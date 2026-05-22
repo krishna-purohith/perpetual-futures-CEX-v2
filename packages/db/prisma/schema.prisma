@@ -1,0 +1,72 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id       String  @id @default(uuid())
+  username String  @unique
+  password String
+  orders   Order[]
+
+  maker Fill? @relation("maker")
+  taker Fill? @relation("taker")
+
+  createdAt DateTime @default(now())
+}
+
+model Order {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  market     Market
+  type       OrderType
+  side       Side
+  qty        Int
+  filledQty  Int
+  makerfills Fill[]    @relation("makerOrder")
+  takerfills Fill[]    @relation("takerOrder")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt()
+}
+
+model Fill {
+  id      String @id @default(uuid())
+  market  Market
+  makerId String @unique
+  maker   User   @relation("maker", fields: [makerId], references: [id])
+
+  takerId String @unique
+  taker   User   @relation("taker", fields: [takerId], references: [id])
+
+  makerOrderId String
+  makerOrder   Order  @relation("makerOrder", fields: [makerOrderId], references: [id])
+  takerOrderId String
+  takerOrder   Order  @relation("takerOrder", fields: [takerOrderId], references: [id])
+
+  createdAt DateTime @default(now())
+}
+
+enum Side {
+  long
+  short
+}
+
+enum OrderType {
+  limit
+  market
+}
+
+enum Market {
+  BTC
+}
