@@ -18,8 +18,8 @@ model User {
   password String
   orders   Order[]
 
-  maker Fill? @relation("maker")
-  taker Fill? @relation("taker")
+  maker Fill[] @relation("maker")
+  taker Fill[] @relation("taker")
 
   createdAt DateTime @default(now())
 }
@@ -28,26 +28,37 @@ model Order {
   id         String    @id @default(uuid())
   userId     String
   user       User      @relation(fields: [userId], references: [id])
-  market     Market
+  market     String
   type       OrderType
   side       Side
-  qty        Int
-  filledQty  Int
+  qty        BigInt
+  price BigInt // for limit: exact price; for market: max price (slippage cap)
+  slippage Int? // basis points (100 = 1 %, 400 = 4%), only for market orders
+  remainingQty  BigInt @default(0)
+  filledQty BigInt @default(0)
+  leverage Int
   makerfills Fill[]    @relation("makerOrder")
   takerfills Fill[]    @relation("takerOrder")
+  status OrderStatus @default(open)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt()
 }
 
+
+
 model Fill {
   id      String @id @default(uuid())
-  market  Market
-  makerId String @unique
+  market  String
+  makerId String 
   maker   User   @relation("maker", fields: [makerId], references: [id])
 
-  takerId String @unique
+  takerId String 
   taker   User   @relation("taker", fields: [takerId], references: [id])
+
+  side Side
+  price BigInt
+  qty BigInt
 
   makerOrderId String
   makerOrder   Order  @relation("makerOrder", fields: [makerOrderId], references: [id])
@@ -58,8 +69,8 @@ model Fill {
 }
 
 enum Side {
-  long
-  short
+  buy 
+  sell
 }
 
 enum OrderType {
@@ -67,6 +78,13 @@ enum OrderType {
   market
 }
 
-enum Market {
-  BTC
+enum OrderStatus {
+  open 
+  partial
+  filled
+  cancelled
 }
+
+
+
+

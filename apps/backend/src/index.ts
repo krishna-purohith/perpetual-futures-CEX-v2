@@ -1,100 +1,39 @@
-import express from "express";
-import { envConfig } from "./env";
-import { authSchema } from "./types";
-import { prisma } from "db";
-import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
-import jwt from "jsonwebtoken";
-import bcrypt from "bcrypt";
+import express, {
+  type Request,
+  type Response,
+  type NextFunction,
+} from "express";
+import { envConfig } from "./utils/env";
+import { type EngineRequest } from "./types";
+import { requireAuth } from "./middleware/requireAuth";
+import { appRouter } from "./routes";
+import redis, { createClient } from "redis";
+
+export const publisher = await createClient()
+  .on("error", (err) => console.error("Redis publisher error", err))
+  .connect();
+export const subscriber = await createClient()
+  .on("error", (err) => console.error("Redis subscriber error", err))
+  .connect();
 
 const app = express();
 app.use(express.json());
 
-app.post("/signup", async (req, res) => {
-  const parsedBody = authSchema.safeParse(req.body);
-  if (!parsedBody.success) {
-    res.status(400).json({
-      error: "Username or password error",
-    });
-    return;
-  }
+app.use(appRouter);
 
-  const { username, password } = parsedBody.data;
+// app.get("/")
 
-  try {
-    const existingUser = await prisma.user.findUnique({
-      where: { username },
-    });
-    if (existingUser) {
-      res.status(400).json({
-        error: "User already exist",
-      });
-      return;
-    }
-
-    const hasedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = await prisma.user.create({
-      data: {
-        username,
-        password: hasedPassword,
-      },
-    });
-
-    res.status(200).json({
-      message: "signup successfull",
-      userId: newUser.id,
-      username: newUser.username,
-    });
-  } catch (err) {
-    console.error(err);
-    if (err instanceof PrismaClientKnownRequestError) {
-      res.status(400).json({
-        error: err,
-      });
-    }
-    res.status(500).json({
-      error: "Internal server error.",
-    });
-  }
+app.get("/me", requireAuth, (req, res) => {
+  res.status(200).json({
+    userId: req.userId,
+  });
 });
 
-app.post("/signin", async (req, res) => {
-  const parsedBody = authSchema.safeParse(req.body);
-  if (!parsedBody.success) {
-    res.status(400).json({
-      error: "Username or password error",
-    });
-    return;
-  }
-
-  const { username, password } = parsedBody.data;
-
-  try {
-    const user = await prisma.user.findUnique({
-      where: { username },
-    });
-    if (!user) {
-      res.status(409).json({
-        error: "Username donot exist",
-      });
-      return;
-    }
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      res.status(409).json({
-        error: "Invalid credentials",
-      });
-      return;
-    }
-
-    const token = jwt.sign({ userId: user.id }, envConfig.jwt_secret);
-    res.status(200).json({
-      token,
-    });
-  } catch (err) {
+app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+  if (err instanceof Error) {
     console.error(err);
     res.status(500).json({
-      error: "Internal server error",
+      error: err instanceof Error ? err.message : "Internal_server_error",
     });
   }
 });
@@ -102,5 +41,3 @@ app.post("/signin", async (req, res) => {
 app.listen(envConfig.port, () =>
   console.log(`Backend started on port ${envConfig.port}`)
 );
-
-app.post("/order", (req, res) => {});
