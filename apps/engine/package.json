@@ -4,6 +4,7 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@types/node": "25.9.1",
     "types": "workspace:*"
   },
   "devDependencies": {

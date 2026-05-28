@@ -168,12 +168,12 @@ put the buy orde in the ordebook
 const orderbook = orderbooks.get(market)
 const ordersAtThisPrice = orderbook.bids.get(limitPrice)
 if (!ordersAtThisPrice) {
-ordersAtThisPrice.set(limitPrice, {
+orderbook.bids.set(limitPrice, {
 availableQty: requiredQty,
 orders: [newOrder]
 })
 } else {
-ordersAtThisPrice.availableQty: += requiredQty,
+ordersAtThisPrice.availableQty: += requiredQty,/
 ordersAtThisPrice.openOrders.push({
 userId,
 side: "buy",
@@ -184,4 +184,23 @@ filledQty: 0,
 price: limitPrice
 })
 }
+}
+
+return {
+orderStatus: "rejected" | "partial" | "filled" | "open"
+
+        orderId,
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qty - qtyFilledTillNow,
+          avgPrice: totalCost / qty - qtyFilledTillNow,
+          fills,
+          positions: "",
+        },
+        placedInOrderbook: {
+          totalQty: qty,
+          openOrderqty: qty - qtyFilledTillNow,
+        },
+    // not sure if this is right or what to return n what not.
+
 }

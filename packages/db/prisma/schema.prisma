@@ -48,7 +48,7 @@ model Order {
 
 
 model Fill {
-  id      String @id @default(uuid())
+  id      String @id 
   market  String
   makerId String 
   maker   User   @relation("maker", fields: [makerId], references: [id])
