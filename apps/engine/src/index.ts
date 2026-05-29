@@ -58,19 +58,12 @@ type Market = string;
 type Price = bigint;
 type PositionStatus = "open" | "closed";
 
-// type AssetBalance = Map<Asset, {
-//   total: number;
-//   lockedInOrders: number;
-//   lockedInPositions: number;
-//   // available = total - lockedInOrders - lockedInPositions
-// }>;
-
 const PRICE_DECIMALS = 6;
 const QTY_DECIMALS = 8;
 
 function calMarginToLock(price: bigint, qty: bigint, leverage: number): bigint {
   const marginB = (price * qty) / BigInt(leverage);
-  return marginB;
+  return marginB / BigInt(10 ** QTY_DECIMALS);
 }
 
 function generatePositionId() {
@@ -86,11 +79,13 @@ function updatePosition(
   leverage: number
 ) {
   // get existing position
-  const userPositions = positions.get(userId);
+  let userPositions = positions.get(userId);
   if (!userPositions) {
     // add a new position
-    positions.set(userId, new Map<Market, Position>());
+    userPositions = new Map<Market, Position>();
+    positions.set(userId, userPositions);
   }
+
   const existingP = positions.get(userId)!.get(market);
 
   const newSide = orderSide === "buy" ? "long" : "short";
@@ -112,13 +107,9 @@ function updatePosition(
     };
     positions.get(userId)!.set(market, position);
     return position;
-
-    // updateBalance
-    // userbalance would have locked with the maxprice * quantity / leverage.
-    // so don't we have to cal the diff fillPrice * fillQty/ leverage - initialLock n release this amount from the locked n we never touch the total here
   } else if (existingP.positionSide === newSide) {
     // increase the position
-    existingP.entryPrice +=
+    existingP.entryPrice =
       (existingP.entryPrice * existingP.qty + fillPrice * fillQty) /
       (existingP.qty + fillQty);
 
@@ -126,39 +117,62 @@ function updatePosition(
     existingP.qty += fillQty;
     existingP.updatedAt = Date.now();
 
-    return userPositions?.get(market);
+    return userPositions.get(market);
   } else {
     // can close few position
     // reduce, close, flip
 
-    const qtyToClose = BigInt(Math.min(Number(existingP.qty), Number(fillQty)));
+    // exixBids = 10, qtyToClose(asks) = 15,
+
+    const qtyToClose = existingP.qty > fillQty ? fillQty : existingP.qty;
 
     const direction = existingP.positionSide === "long" ? +1 : -1;
 
     const realizedPnL =
       (fillPrice - existingP.entryPrice) * qtyToClose * BigInt(direction);
 
-    const remainingQty = existingP.qty - qtyToClose;
+    const quote = getQuoteAsset(market);
+    const userBalance = balances.get(userId)!.get(quote)!;
+
+    const remainingQty = existingP.qty - fillQty;
 
     if (remainingQty === BigInt(0)) {
       // close
+      const marginToRelease = existingP.margin;
+      userBalance.locked -= marginToRelease;
+      userBalance.total += realizedPnL;
+
       userPositions?.delete(market);
-      // we have check if !userPositions case n created a userPosition n still typescript is not happy n gives questionmark.
       return "position closed";
-    } else if (remainingQty > 0) {
+    } else if (remainingQty > 0n) {
       // reduce
-      existingP.margin -= (existingP.margin / existingP.qty) * qtyToClose;
+      const marginToRelease = (existingP.margin / existingP.qty) * qtyToClose;
+      userBalance.locked -= marginToRelease;
+      userBalance.total += realizedPnL;
+
+      existingP.margin -= marginToRelease;
       existingP.qty -= qtyToClose;
       existingP.updatedAt = Date.now();
 
       return userPositions?.get(market);
-    } else if (remainingQty < 0) {
+    } else if (remainingQty < 0n) {
       // flip
+
+      const marginToRelease = existingP.margin;
+      userBalance.locked -= marginToRelease;
+      userBalance.total += realizedPnL;
+
       existingP.positionSide =
         existingP.positionSide === "long" ? "short" : "long";
+
       const qtyToFlip = remainingQty * BigInt(-1);
-      existingP.entryPrice = qtyToFlip * fillPrice;
-      existingP.margin = calMarginToLock(fillPrice, qtyToFlip, leverage);
+
+      const newMargin = calMarginToLock(fillPrice, qtyToFlip, leverage);
+
+      userBalance.locked += newMargin;
+
+      existingP.entryPrice = fillPrice;
+      existingP.margin = newMargin;
       existingP.qty = qtyToFlip;
       existingP.updatedAt = Date.now();
 
@@ -247,7 +261,7 @@ function matchBuyOrder(
 
   const sortedAsks = new Map(
     Array.from(prices).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
-  ); // learn how this works.
+  );
 
   for (const [price, bid] of sortedAsks) {
     if (price > maxPrice) {
@@ -279,22 +293,17 @@ function matchBuyOrder(
         makerId,
         takerId,
         side: "buy",
-        price: BigInt(order.price),
-        qty: BigInt(filledInThisOrder),
+        price: order.price,
+        qty: filledInThisOrder,
         makerOrderId,
         takerOrderId,
         createdAt,
       });
 
+      orderbook.lastTradedPrice = price;
+
       // update taker position n release excess margin
-      updatePosition(
-        userId,
-        market,
-        "buy",
-        BigInt(filledInThisOrder),
-        BigInt(price),
-        leverage
-      );
+      updatePosition(userId, market, "buy", filledInThisOrder, price, leverage);
       releaseExcessMargin(
         userId,
         maxPrice,
@@ -309,8 +318,8 @@ function matchBuyOrder(
         order.userId,
         market,
         "sell",
-        BigInt(filledInThisOrder),
-        BigInt(price),
+        filledInThisOrder,
+        price,
         order.leverage
       );
       releaseExcessMargin(
@@ -322,18 +331,53 @@ function matchBuyOrder(
         market
       );
 
-      if (qtyFilledTillNow === qty) break;
       if (order.filledQty === order.qty) {
         // remove order from orderbook
         orderbook.asks.get(price)?.openOrders.splice(i, 1);
         i--;
-        continue;
-        // also break from here
       }
+
+      if (qtyFilledTillNow === qty) break;
     }
 
     if (bid.availableQty === 0n) {
       orderbook.asks.delete(price);
+    }
+  }
+
+  if (qtyFilledTillNow === 0n) {
+    if (orderType === "market") {
+      return {
+        orderStatus: "rejected",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+      };
+    } else if (orderType === "limit") {
+      placeOrderInOrderbook(
+        orderId,
+        userId,
+        "buy",
+        market,
+        qty,
+        maxPrice,
+        leverage
+      );
+
+      return {
+        orderStatus: "open",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+      };
     }
   }
 
@@ -344,7 +388,7 @@ function matchBuyOrder(
         filledDetails: {
           totalQty: qty,
           filledQty: qtyFilledTillNow,
-          avgPrice: qtyFilledTillNow > 0 ? totalCost / qtyFilledTillNow : 0,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
           fills,
           position: null,
         },
@@ -359,7 +403,7 @@ function matchBuyOrder(
           filledQty: qtyFilledTillNow,
           avgPrice: qtyFilledTillNow > 0 ? totalCost / qtyFilledTillNow : 0,
           fills,
-          position, // is this right
+          position,
         },
       };
     }
@@ -426,7 +470,8 @@ function releaseExcessMargin(
   const actualMargin = calMarginToLock(fillPrice, fillQty, leverage);
   const excess = lockedMargin - actualMargin;
 
-  const userBalance = balances.get(userId)!.get(market)!;
+  const quote = getQuoteAsset(market);
+  const userBalance = balances.get(userId)!.get(quote)!;
 
   if (excess > 0n) {
     userBalance.locked -= excess;
@@ -453,14 +498,16 @@ function placeOrderInOrderbook(
     price: maxPrice,
     leverage,
   };
-  const bids = ORDER_BOOKS.get(market)?.bids.get(maxPrice);
-  if (!bids) {
-    ORDER_BOOKS.get(market)!.bids.set(maxPrice, {
+  const side = orderSide === "buy" ? "bids" : "asks";
+
+  const level = ORDER_BOOKS.get(market)![side].get(maxPrice);
+  if (!level) {
+    ORDER_BOOKS.get(market)![side].set(maxPrice, {
       availableQty: qty,
       openOrders: [newOrder],
     });
   } else {
-    ((bids.availableQty += qty), bids.openOrders.push(newOrder));
+    ((level.availableQty += qty), level.openOrders.push(newOrder));
   }
 }
 
@@ -471,7 +518,8 @@ function balanceChecknLock(
   qty: bigint,
   leverage: number
 ) {
-  const userBalance = balances.get(userId)!.get(market);
+  const quote = getQuoteAsset(market);
+  const userBalance = balances.get(userId)!.get(quote);
   if (!userBalance) {
     return {
       success: false,
@@ -495,3 +543,11 @@ function balanceChecknLock(
     success: true,
   };
 }
+
+function getQuoteAsset(market: string) {
+  const quote = market.split("-")[1];
+  if (!quote) throw new Error(`Invalid market format: ${market}`);
+  return quote;
+}
+
+// how are you handling this case. use has a long order, n places a short in the same market. where are you netting the users order ?
