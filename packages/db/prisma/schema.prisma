@@ -65,7 +65,7 @@ model Fill {
   takerOrderId String
   takerOrder   Order  @relation("takerOrder", fields: [takerOrderId], references: [id])
 
-  createdAt DateTime @default(now())
+  createdAt Int
 }
 
 enum Side {

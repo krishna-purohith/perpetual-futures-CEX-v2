@@ -1,9 +1,9 @@
-import type { NextFunction, Request, Response } from "express";
-import { authSchema } from "../types";
-import { prisma } from "db";
-import bcrypt from "bcrypt";
 import { PrismaClientKnownRequestError } from "@prisma/client/runtime/client";
+import bcrypt from "bcrypt";
+import { prisma } from "db";
+import type { Request, Response } from "express";
 import jwt from "jsonwebtoken";
+import { authSchema } from "../types/zodSchema";
 import { envConfig } from "../utils/env";
 import { sendValidationError } from "../utils/validation";
 

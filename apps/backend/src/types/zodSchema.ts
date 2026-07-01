@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { envConfig } from "../utils/env";
+import { order } from "../controllers/engine.controller";
 
 export const authSchema = z.object({
   username: z.string().min(1, "username cannot be empty"),
@@ -11,22 +12,10 @@ export interface TokenPayload {
 }
 
 export const orderSchema = z.object({
+  price: z.bigint(),
   market: z.string(),
   type: z.enum(["market", "limit"]),
   side: z.enum(["long", "short"]),
   qty: z.number().positive("Qty should be positive"),
+  leverage: z.number().positive("Leverage should be positive"),
 });
-
-export interface EngineRequest {
-  market: string;
-  type: OrderType;
-  side: Side;
-  qty: number;
-}
-
-export type OrderType = "market" | "limit";
-export type Side = "long" | "short";
-
-function sendToEngine(engineRequest: EngineRequest) {
-  const correlationId = crypto.randomUUID();
-}

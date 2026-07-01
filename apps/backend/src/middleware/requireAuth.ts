@@ -1,7 +1,7 @@
 import type { NextFunction, Response, Request } from "express";
 import jwt from "jsonwebtoken";
 import { envConfig } from "../utils/env";
-import type { TokenPayload } from "../types";
+import type { TokenPayload } from "../types/zodSchema";
 
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = req.headers.authorization;

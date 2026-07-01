@@ -5,6 +5,8 @@
   "private": true,
   "dependencies": {
     "@types/node": "25.9.1",
+    "redis": "6.0.0",
+    "superjson": "2.2.6",
     "types": "workspace:*"
   },
   "devDependencies": {

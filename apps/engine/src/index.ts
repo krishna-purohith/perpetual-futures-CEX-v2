@@ -1,4 +1,6 @@
-import type { Fill } from "types";
+import { createClient } from "redis";
+import SuperJSON from "superjson";
+import type { EngineRequest, Fill } from "types";
 
 interface OpenOrder {
   originalOrderId: string;
@@ -23,7 +25,7 @@ interface OrderBook {
   lastTradedPrice: bigint;
 }
 
-interface Position {
+export interface Position {
   market: string;
   userId: string;
   positionId: string;
@@ -46,6 +48,8 @@ const balances = new Map<UserId, AssetBalance>();
 
 type AssetBalance = Map<Asset, { locked: bigint; total: bigint }>;
 type PositionSide = "long" | "short";
+type PositionStatus = "open" | "closed";
+
 type OrderSide = "buy" | "sell";
 type OrderType = "market" | "limit";
 
@@ -56,7 +60,6 @@ type Asset = string;
 type UserId = string;
 type Market = string;
 type Price = bigint;
-type PositionStatus = "open" | "closed";
 
 const PRICE_DECIMALS = 6;
 const QTY_DECIMALS = 8;
@@ -88,7 +91,7 @@ function updatePosition(
 
   const existingP = positions.get(userId)!.get(market);
 
-  const newSide = orderSide === "buy" ? "long" : "short";
+  const newSide: PositionSide = orderSide === "buy" ? "long" : "short";
 
   if (!existingP) {
     const margin = calMarginToLock(fillPrice, fillQty, leverage);
@@ -101,7 +104,7 @@ function updatePosition(
       leverage,
       margin,
       qty: fillQty,
-      positionStatus: "open",
+      positionStatus: "open" as PositionStatus,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -232,7 +235,7 @@ function matchBuyOrder(
       placeOrderInOrderbook(
         orderId,
         userId,
-        "buy",
+        orderSide,
         market,
         qty,
         maxPrice,
@@ -263,12 +266,12 @@ function matchBuyOrder(
     Array.from(prices).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
   );
 
-  for (const [price, bid] of sortedAsks) {
+  for (const [price, ask] of sortedAsks) {
     if (price > maxPrice) {
       break;
     }
-    for (let i = 0; i < bid.openOrders.length; i++) {
-      const order = bid.openOrders[i];
+    for (let i = 0; i < ask.openOrders.length; i++) {
+      const order = ask.openOrders[i];
       if (!order) {
         continue;
       }
@@ -279,7 +282,7 @@ function matchBuyOrder(
       totalCost += price * filledInThisOrder;
       qtyFilledTillNow += filledInThisOrder;
       order.filledQty += filledInThisOrder;
-      bid.availableQty -= filledInThisOrder;
+      ask.availableQty -= filledInThisOrder;
 
       const makerId = order.userId;
       const takerId = userId;
@@ -292,7 +295,7 @@ function matchBuyOrder(
         market,
         makerId,
         takerId,
-        side: "buy",
+        side: orderSide,
         price: order.price,
         qty: filledInThisOrder,
         makerOrderId,
@@ -303,7 +306,14 @@ function matchBuyOrder(
       orderbook.lastTradedPrice = price;
 
       // update taker position n release excess margin
-      updatePosition(userId, market, "buy", filledInThisOrder, price, leverage);
+      updatePosition(
+        userId,
+        market,
+        orderSide,
+        filledInThisOrder,
+        price,
+        leverage
+      );
       releaseExcessMargin(
         userId,
         maxPrice,
@@ -340,7 +350,7 @@ function matchBuyOrder(
       if (qtyFilledTillNow === qty) break;
     }
 
-    if (bid.availableQty === 0n) {
+    if (ask.availableQty === 0n) {
       orderbook.asks.delete(price);
     }
   }
@@ -401,7 +411,7 @@ function matchBuyOrder(
         filledDetails: {
           totalQty: qty,
           filledQty: qtyFilledTillNow,
-          avgPrice: qtyFilledTillNow > 0 ? totalCost / qtyFilledTillNow : 0,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
           fills,
           position,
         },
@@ -417,7 +427,7 @@ function matchBuyOrder(
         filledDetails: {
           totalQty: qty,
           filledQty: qtyFilledTillNow,
-          avgPrice: qtyFilledTillNow > 0 ? totalCost / qtyFilledTillNow : 0,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
           fills,
           position: null,
         },
@@ -441,7 +451,7 @@ function matchBuyOrder(
         filledDetails: {
           totalQty: qty,
           filledQty: qtyFilledTillNow,
-          avgPrice: qtyFilledTillNow > 0 ? totalCost / qtyFilledTillNow : 0,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
           fills,
           position,
         },
@@ -454,9 +464,285 @@ function matchBuyOrder(
   }
 }
 
-function matchSellOrder() {} // will write it now once my BuyOrder is good.
+function matchSellOrder(
+  userId: string,
+  orderId: string,
+  qty: bigint,
+  minPrice: bigint,
+  orderType: "market" | "limit",
+  orderSide: "sell",
+  market: string,
+  leverage: number
+) {
+  // check if user has enough balance
+  const res = balanceChecknLock(userId, market, minPrice, qty, leverage);
+  if (!res.success) {
+    return res.error;
+  }
+  let qtyFilledTillNow = 0n;
+  let totalCost = 0n;
+  const fills: Fill[] = [];
 
-function updateBalance() {} // I think this is now not needed as we are handling balances with releaseExcessMargin n balanceChecknLock fn
+  const orderbook = ORDER_BOOKS.get(market);
+
+  if (!orderbook) {
+    ORDER_BOOKS.set(market, {
+      bids: new Map<bigint, BidsNAsks>(),
+      asks: new Map<bigint, BidsNAsks>(),
+      lastTradedPrice: 0n,
+    });
+
+    if (orderType === "market") {
+      // reject the order
+      // create the return object
+      return {
+        orderStatus: "rejected",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: 0n,
+          avgPrice: null,
+          fills,
+          positions: null,
+        },
+        placedInOrderbook: {
+          totalQty: qty,
+          openOrderQty: qty,
+        },
+      };
+    } else if (orderType === "limit") {
+      // place the order on the book
+
+      placeOrderInOrderbook(
+        orderId,
+        userId,
+        "sell",
+        market,
+        qty,
+        minPrice,
+        leverage
+      );
+    }
+    // create the return object
+    return {
+      orderStatus: "open",
+      filledDetails: {
+        totalQty: qty,
+        filledQty: 0n,
+        avgPrice: null,
+        fills,
+        positions: null,
+      },
+      placedInOrderbook: {
+        totalQty: qty,
+        openOrderQty: qty,
+      },
+    };
+  }
+
+  // start matching from the order book.
+  const prices = orderbook.bids.entries();
+
+  const sortedBids = new Map(
+    Array.from(prices).sort((a, b) => (a[0] < b[0] ? 1 : a[0] > b[0] ? -1 : 0))
+  );
+
+  for (const [price, bid] of sortedBids) {
+    if (price < minPrice) {
+      break;
+    }
+    for (let i = 0; i < bid.openOrders.length; i++) {
+      const order = bid.openOrders[i];
+      if (!order) {
+        continue;
+      }
+      const remainingQty = qty - qtyFilledTillNow;
+      const availableQty = order.qty - order.filledQty;
+      const filledInThisOrder =
+        availableQty > remainingQty ? remainingQty : availableQty;
+      totalCost += price * filledInThisOrder;
+      qtyFilledTillNow += filledInThisOrder;
+      order.filledQty += filledInThisOrder;
+      bid.availableQty -= filledInThisOrder;
+
+      const makerId = order.userId;
+      const takerId = userId;
+      const makerOrderId = order.originalOrderId;
+      const takerOrderId = orderId;
+      const createdAt = Date.now();
+
+      fills.push({
+        id: crypto.randomUUID(),
+        market,
+        makerId,
+        takerId,
+        side: "sell",
+        price: order.price,
+        qty: filledInThisOrder,
+        makerOrderId,
+        takerOrderId,
+        createdAt,
+      });
+
+      orderbook.lastTradedPrice = price;
+
+      // update taker position n release excess margin
+      updatePosition(
+        userId,
+        market,
+        "sell",
+        filledInThisOrder,
+        price,
+        leverage
+      );
+      releaseExcessMargin(
+        userId,
+        minPrice,
+        price,
+        filledInThisOrder,
+        leverage,
+        market
+      );
+
+      // update maker position n release excess margin
+      updatePosition(
+        order.userId,
+        market,
+        "buy",
+        filledInThisOrder,
+        price,
+        order.leverage
+      );
+      releaseExcessMargin(
+        order.userId,
+        order.price,
+        price,
+        filledInThisOrder,
+        leverage,
+        market
+      );
+
+      if (order.filledQty === order.qty) {
+        // remove order from orderbook
+        orderbook.bids.get(price)?.openOrders.splice(i, 1);
+        i--;
+      }
+
+      if (qtyFilledTillNow === qty) break;
+    }
+
+    if (bid.availableQty === 0n) {
+      orderbook.bids.delete(price);
+    }
+  }
+
+  if (qtyFilledTillNow === 0n) {
+    if (orderType === "market") {
+      return {
+        orderStatus: "rejected",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+      };
+    } else if (orderType === "limit") {
+      placeOrderInOrderbook(
+        orderId,
+        userId,
+        "sell",
+        market,
+        qty,
+        minPrice,
+        leverage
+      );
+
+      return {
+        orderStatus: "open",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+      };
+    }
+  }
+
+  if (qtyFilledTillNow === qty) {
+    if (orderType === "market") {
+      return {
+        orderStatus: "filled",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+      };
+    } else if (orderType === "limit") {
+      const position = positions.get(userId)?.get(market);
+
+      return {
+        orderStatus: "filled",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position,
+        },
+      };
+    }
+  }
+
+  if (qtyFilledTillNow < qty) {
+    if (orderType === "market") {
+      // cancel
+      return {
+        orderStatus: "partial",
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position: null,
+        },
+        rejectedQty: qty - qtyFilledTillNow,
+      };
+    } else if (orderType === "limit") {
+      placeOrderInOrderbook(
+        orderId,
+        userId,
+        "sell",
+        market,
+        qty - qtyFilledTillNow,
+        minPrice,
+        leverage
+      );
+      const position = positions.get(userId)?.get(market);
+
+      return {
+        orderStatus: "partial",
+        orderId,
+        filledDetails: {
+          totalQty: qty,
+          filledQty: qtyFilledTillNow,
+          avgPrice: qtyFilledTillNow > 0n ? totalCost / qtyFilledTillNow : 0n,
+          fills,
+          position,
+        },
+        placedInOrderbook: {
+          totalQty: qty,
+          openOrderqty: qty - qtyFilledTillNow,
+        },
+      };
+    }
+  }
+} // will write it now once my BuyOrder is good.
 
 function releaseExcessMargin(
   userId: string,
@@ -514,7 +800,7 @@ function placeOrderInOrderbook(
 function balanceChecknLock(
   userId: string,
   market: string,
-  maxPrice: bigint,
+  lockPrice: bigint,
   qty: bigint,
   leverage: number
 ) {
@@ -528,7 +814,7 @@ function balanceChecknLock(
   }
   const availBalance = userBalance.total - userBalance.locked;
 
-  const marginToLock = calMarginToLock(maxPrice, qty, leverage);
+  const marginToLock = calMarginToLock(lockPrice, qty, leverage);
 
   if (availBalance < marginToLock) {
     return {
@@ -551,3 +837,120 @@ function getQuoteAsset(market: string) {
 }
 
 // how are you handling this case. use has a long order, n places a short in the same market. where are you netting the users order ?
+
+export interface EngineResponse {
+  correlationId: string;
+  orderId: string;
+  orderStatus: "filled" | "partial" | "open" | "rejected" | "cancelled";
+  filledQty: bigint;
+  avgPrice: bigint;
+  fills: Fill[];
+  position: Position | null;
+}
+
+const redisClient = createClient();
+
+const STREAM_KEY = "requestQueue";
+const RESPONSE_STREAM = "responseQueue";
+
+const GROUP_NAME = "engineGroup";
+const CONSUMER_NAME = "engine-1";
+
+async function startEngine() {
+  await redisClient.connect();
+
+  try {
+    redisClient.xGroupCreate(STREAM_KEY, GROUP_NAME, "0", { MKSTREAM: true });
+  } catch (error) {}
+
+  while (true) {
+    try {
+      const messages = await redisClient.xReadGroup(
+        GROUP_NAME,
+        CONSUMER_NAME,
+        { key: STREAM_KEY, id: ">" },
+        { COUNT: 1, BLOCK: 0 }
+      );
+      if (!messages) continue;
+
+      for (const { name, messages: msgs } of messages) {
+        for (const { id, message } of msgs) {
+          try {
+            const request: EngineRequest = SuperJSON.parse(message.data);
+
+            const response = handleEngineRequest(request);
+
+            await redisClient.xAdd(RESPONSE_STREAM, "*", {
+              correlationId: request.correlationId,
+              data: SuperJSON.stringify(response),
+            });
+
+            await redisClient.xAck(STREAM_KEY, GROUP_NAME, id);
+          } catch (e) {
+            // single order failed, log and continue
+            console.error("Order processing failed: ", e);
+
+            // still xAck to prevent infinite retry of bad message
+            await redisClient.xAck(STREAM_KEY, GROUP_NAME, id);
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Redis error: ", error);
+      await new Promise((r) => setTimeout(r, 1000)); // wait 1s before retry.
+    }
+  }
+}
+
+await redisClient.connect();
+// await redisClient.xGroupCreate("requestQueue", "k-consumergroup-1", "$", {
+//   MKSTREAM: true,
+// });
+
+while (1) {
+  const backendRequest = await redisClient.xReadGroup(
+    "k-consumergroup-1",
+    "k-consumer-1",
+    [{ key: "requestQueue", id: ">" }],
+    { BLOCK: 2000, COUNT: 1 }
+  );
+
+  if (!backendRequest) {
+    console.log("nothing found");
+    continue;
+  }
+
+  const msges = backendRequest[0]?.messages;
+  console.log("krishna");
+  console.log("msges:", msges);
+  console.log("jyothi");
+  sendToEngine(msges[0].message);
+  console.log("after send to engine");
+}
+
+interface EngReq {
+  orderId: string;
+  todo: string;
+  userId: string;
+}
+
+function sendToEngine(msg: EngReq) {
+  console.log("inside sendtoengine");
+  console.log("msg:", msg);
+  const res = { success: "true", ...msg };
+  console.log("res", res);
+  sendResponseToBackend(res);
+}
+
+interface EngRes extends EngReq {
+  success: string;
+}
+
+async function sendResponseToBackend(result: EngRes) {
+  console.log("inside sendResponsetoBakend");
+  await redisClient.xAdd(
+    "responseQueue",
+    "*",
+    result as unknown as Record<string, string>
+  );
+}

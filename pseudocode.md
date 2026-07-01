@@ -188,19 +188,39 @@ price: limitPrice
 
 return {
 orderStatus: "rejected" | "partial" | "filled" | "open"
-
-        orderId,
-        filledDetails: {
-          totalQty: qty,
-          filledQty: qty - qtyFilledTillNow,
-          avgPrice: totalCost / qty - qtyFilledTillNow,
-          fills,
-          positions: "",
-        },
-        placedInOrderbook: {
-          totalQty: qty,
-          openOrderqty: qty - qtyFilledTillNow,
-        },
-    // not sure if this is right or what to return n what not.
-
+orderId,
+filledDetails: {
+totalQty: qty,
+filledQty: qty - qtyFilledTillNow,
+avgPrice: totalCost / qty - qtyFilledTillNow,
+fills,
+positions: "",
+},
+placedInOrderbook: {
+totalQty: qty,
+openOrderqty: qty - qtyFilledTillNow,
+},
+// not sure if this is right or what to return n what not.
 }
+
+// price of BTC, USD: 54,382.25
+// but we decided to store with more precision, upto 6 decimal preceision so our BTC price is now 54382258475 (integer)
+So PRICE_DECIMALS = 6, WE shifted 6 decimal places left.
+real world BTC quantity 1 BTC = 1,00,000,000 (smallest unit)
+1 satoshi = 0.000 000 01 stored as 1
+0.5 BTC = 0.5 \* 10\*\* 8 500 000 00
+QTY_DECIMALS = 8
+
+NOW what is bigint vs number ?
+number
+
+now 14 decimals problem.
+
+price \* qty
+price stored as bigint 50123456789 -> whose real value is 50123.456789
+qty stored as bigint 50000000 -> 0.5BTC shifted 8 places.
+
+price _ qty = 25061.728394 50000000
+real multip = 0.5 BTC _ 50123.456789 = 25,061.728394...
+
+so 25061 728394 50000000 represents 25,061.728394
